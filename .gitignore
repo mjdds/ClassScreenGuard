@@ -1,0 +1,9 @@
+bin/
+obj/
+cipx/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.csproj.user
