@@ -1,5 +1,7 @@
 # 教室屏幕操作锁
 
+<img src="icon.png" alt="教室屏幕操作锁图标" width="128" />
+
 ClassScreenGuard 是一个适用于 ClassIsland 2.x 的 Windows 屏幕操作锁插件。锁定后保留当前屏幕画面，不显示全屏遮挡层，同时隔离鼠标、触摸和普通键盘输入，适用于需要临时限制教室电脑操作的场景。
 
 ## 功能
