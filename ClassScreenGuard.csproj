@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ClassScreenGuard</AssemblyName>
     <RootNamespace>ClassScreenGuard</RootNamespace>
+    <Version>1.4.0.0</Version>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
@@ -13,6 +15,7 @@
     <PackageReference Include="ClassIsland.PluginSdk" Version="2.1.0.1">
       <ExcludeAssets>runtime; native</ExcludeAssets>
     </PackageReference>
+    <PackageReference Include="Microsoft.Win32.SystemEvents" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

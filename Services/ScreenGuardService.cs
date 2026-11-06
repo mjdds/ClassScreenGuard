@@ -3,6 +3,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using ClassScreenGuard.Controls;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Win32;
 
 namespace ClassScreenGuard.Services;
 
@@ -11,49 +12,89 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
 {
     private readonly GuardSettingsService _settings;
     private readonly NativeInputGuard _inputGuard = new();
+    private readonly NativePointerGuard _pointerGuard = new();
+    private readonly AdminPasswordSequenceDetector _adminSequence;
     private readonly List<LockWindow> _windows = new();
     private DispatcherTimer? _foregroundTimer;
+    private DispatcherTimer? _scheduleTimer;
     private UnlockWindow? _unlockWindow;
+    private AdminUnlockNoticeWindow? _adminNoticeWindow;
+    private bool _systemShutdown;
     private bool _disposed;
 
     public ScreenGuardService(GuardSettingsService settings)
     {
         _settings = settings;
+        _adminSequence = new AdminPasswordSequenceDetector(settings);
+        _adminSequence.UnlockRequested += () => RunOnUiThread(AdminUnlockOnUiThread);
         _inputGuard.LockHotkeyPressed += (_, _) => RequestLock();
+        _inputGuard.TextTyped += _adminSequence.Append;
+        _inputGuard.TextSequenceInterrupted += _adminSequence.Interrupt;
+        _pointerGuard.ForeignWindowActivated += (_, _) => RunOnUiThread(KeepWindowsInForeground);
     }
 
     public bool IsLocked { get; private set; }
 
     public bool CanLock => _settings.HasPassword;
 
+    public bool IsLockAllowedNow => _settings.IsLockAllowedNow();
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _inputGuard.Start();
+        _pointerGuard.Start();
+        SystemEvents.SessionEnding += OnSessionEnding;
+        RunOnUiThread(() =>
+        {
+            _scheduleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+            _scheduleTimer.Tick += (_, _) => EnforceLockSchedule();
+            _scheduleTimer.Start();
+
+            if (_settings.ConsumeResumeLockAfterLogoff() && _settings.HasPassword &&
+                _settings.IsLockAllowedNow())
+            {
+                LockOnUiThread();
+            }
+        });
         return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
     {
-        RunOnUiThread(UnlockOnUiThread);
+        _settings.SetResumeLockAfterLogoff(IsLocked && !_systemShutdown);
+        SystemEvents.SessionEnding -= OnSessionEnding;
+        RunOnUiThread(() =>
+        {
+            _scheduleTimer?.Stop();
+            _scheduleTimer = null;
+            UnlockOnUiThread();
+        });
+        _adminSequence.Dispose();
         _inputGuard.Dispose();
+        _pointerGuard.Dispose();
         return Task.CompletedTask;
     }
 
     /// <summary>未锁定时锁定；已锁定时只显示小密码框。</summary>
     public void RequestLock()
     {
-        if (_disposed || !_settings.HasPassword)
+        if (_disposed)
         {
             return;
         }
 
         RunOnUiThread(() =>
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             if (IsLocked)
             {
                 ShowUnlockPromptOnUiThread();
             }
-            else
+            else if (_settings.HasPassword)
             {
                 LockOnUiThread();
             }
@@ -62,14 +103,20 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
 
     private void LockOnUiThread()
     {
-        if (_disposed || IsLocked || !_settings.HasPassword)
+        if (_disposed || IsLocked || !_settings.HasPassword || !_settings.IsLockAllowedNow())
         {
             return;
         }
 
         IsLocked = true;
+        _adminSequence.SetActive(true);
+        _adminNoticeWindow?.Close();
+        _adminNoticeWindow = null;
         _inputGuard.SetPasswordPromptOpen(false);
+        _pointerGuard.SetPasswordPromptOpen(false);
         _inputGuard.SetLocked(true);
+        _pointerGuard.SetAllowedWindows(Array.Empty<IntPtr>());
+        _pointerGuard.SetLocked(true);
 
         try
         {
@@ -92,10 +139,16 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
                 PositionWindow(CreateShieldWindow(false), screen);
             }
 
-            _foregroundTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-            _foregroundTimer.Tick += (_, _) => KeepWindowsInForeground();
+            UpdateAllowedWindows();
+            _foregroundTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _foregroundTimer.Tick += (_, _) =>
+            {
+                _pointerGuard.SuppressShellWindows();
+                KeepWindowsInForeground();
+            };
             _foregroundTimer.Start();
 
+            _pointerGuard.SuppressShellWindows();
             KeepWindowsInForeground();
             primaryWindow.FocusShield();
         }
@@ -125,12 +178,18 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
 
         if (_unlockWindow != null)
         {
-            _unlockWindow.FocusPassword();
+            var foreground = NativeWindowMethods.GetForegroundWindow();
+            if (foreground != _unlockWindow.NativeHandle &&
+                !_pointerGuard.IsVirtualKeyboardWindow(foreground))
+            {
+                _unlockWindow.FocusPassword();
+            }
             return;
         }
 
         _inputGuard.SetPasswordPromptOpen(true);
-        var prompt = new UnlockWindow(TryUnlock);
+        _pointerGuard.SetPasswordPromptOpen(true);
+        var prompt = new UnlockWindow(_settings, UnlockOnUiThread);
         _unlockWindow = prompt;
         prompt.Closed += (_, _) =>
         {
@@ -140,33 +199,26 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
             }
 
             _inputGuard.SetPasswordPromptOpen(false);
+            _pointerGuard.SetPasswordPromptOpen(false);
+            UpdateAllowedWindows();
             if (IsLocked)
             {
                 _windows.FirstOrDefault()?.FocusShield();
             }
         };
         prompt.Show();
+        UpdateAllowedWindows();
         KeepWindowsInForeground();
-        prompt.FocusPassword();
-    }
-
-    private bool TryUnlock(string password)
-    {
-        if (!_settings.VerifyPassword(password))
-        {
-            return false;
-        }
-
-        RunOnUiThread(UnlockOnUiThread);
-        return true;
     }
 
     private void UnlockOnUiThread()
     {
         _foregroundTimer?.Stop();
         _foregroundTimer = null;
+        _adminSequence.SetActive(false);
         IsLocked = false;
         _inputGuard.SetPasswordPromptOpen(false);
+        _pointerGuard.SetPasswordPromptOpen(false);
 
         try
         {
@@ -192,6 +244,63 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
 
         _windows.Clear();
         _inputGuard.SetLocked(false);
+        _pointerGuard.SetAllowedWindows(Array.Empty<IntPtr>());
+        _pointerGuard.SetLocked(false);
+    }
+
+    private void AdminUnlockOnUiThread()
+    {
+        if (!IsLocked)
+        {
+            return;
+        }
+
+        UnlockOnUiThread();
+        _adminNoticeWindow?.Close();
+        var notice = new AdminUnlockNoticeWindow();
+        _adminNoticeWindow = notice;
+        notice.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_adminNoticeWindow, notice))
+            {
+                _adminNoticeWindow = null;
+            }
+        };
+        notice.Show();
+    }
+
+    private void OnSessionEnding(object? sender, SessionEndingEventArgs args)
+    {
+        if (args.Reason == SessionEndReasons.Logoff)
+        {
+            _settings.SetResumeLockAfterLogoff(IsLocked);
+            return;
+        }
+
+        _systemShutdown = true;
+        _settings.SetResumeLockAfterLogoff(false);
+    }
+
+    private void EnforceLockSchedule()
+    {
+        if (IsLocked && !_settings.IsLockAllowedNow())
+        {
+            UnlockOnUiThread();
+        }
+    }
+
+    private void UpdateAllowedWindows()
+    {
+        var handles = _windows
+            .Select(window => window.NativeHandle)
+            .Where(handle => handle != IntPtr.Zero)
+            .ToList();
+        if (_unlockWindow != null && _unlockWindow.NativeHandle != IntPtr.Zero)
+        {
+            handles.Add(_unlockWindow.NativeHandle);
+        }
+
+        _pointerGuard.SetAllowedWindows(handles);
     }
 
     private void KeepWindowsInForeground()
@@ -209,25 +318,42 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
             }
         }
 
+        var foreground = NativeWindowMethods.GetForegroundWindow();
+        var virtualKeyboardFocused = _pointerGuard.IsVirtualKeyboardWindow(foreground);
+
         if (_unlockWindow != null)
         {
             _unlockWindow.Topmost = true;
             if (_unlockWindow.NativeHandle != IntPtr.Zero)
             {
                 NativeWindowMethods.SetTopmost(_unlockWindow.NativeHandle);
+                if (foreground == _unlockWindow.NativeHandle || virtualKeyboardFocused)
+                {
+                    return;
+                }
+
                 NativeWindowMethods.SetForegroundWindow(_unlockWindow.NativeHandle);
             }
-            _unlockWindow.Activate();
+
+            if (!virtualKeyboardFocused)
+            {
+                _unlockWindow.Activate();
+            }
             return;
         }
 
         var primary = _windows.FirstOrDefault();
-        if (primary == null)
+        if (primary == null || virtualKeyboardFocused)
         {
             return;
         }
 
         primary.Topmost = true;
+        if (_windows.Any(window => window.NativeHandle == foreground))
+        {
+            return;
+        }
+
         primary.Activate();
         if (primary.NativeHandle != IntPtr.Zero)
         {
@@ -274,8 +400,16 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
         }
 
         _disposed = true;
-        RunOnUiThread(UnlockOnUiThread);
+        SystemEvents.SessionEnding -= OnSessionEnding;
+        RunOnUiThread(() =>
+        {
+            _scheduleTimer?.Stop();
+            _scheduleTimer = null;
+            UnlockOnUiThread();
+        });
+        _adminSequence.Dispose();
         _inputGuard.Dispose();
+        _pointerGuard.Dispose();
     }
 }
 
@@ -306,4 +440,7 @@ internal static class NativeWindowMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
 }

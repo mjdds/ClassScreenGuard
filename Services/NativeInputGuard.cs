@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace ClassScreenGuard.Services;
 
@@ -26,15 +27,25 @@ public sealed class NativeInputGuard : IDisposable
     private const uint VkControl = 0x11;
     private const uint VkMenu = 0x12;
     private const uint VkShift = 0x10;
+    private const uint VkCapital = 0x14;
+    private const uint VkLShift = 0xA0;
+    private const uint VkRShift = 0xA1;
+    private const uint VkLControl = 0xA2;
+    private const uint VkRControl = 0xA3;
+    private const uint VkLMenu = 0xA4;
+    private const uint VkRMenu = 0xA5;
+    private const uint LlKhfAltDown = 0x20;
 
     private readonly HookProc _hookProc;
     private readonly ManualResetEventSlim _ready = new(false);
+    private readonly HashSet<uint> _pressedModifiers = new();
     private Thread? _thread;
     private IntPtr _hookHandle;
     private uint _threadId;
     private volatile bool _locked;
     private volatile bool _passwordPromptOpen;
     private bool _windowsKeyDown;
+    private bool _hotkeyLatched;
     private bool _disposed;
 
     public NativeInputGuard()
@@ -43,6 +54,10 @@ public sealed class NativeInputGuard : IDisposable
     }
 
     public event EventHandler? LockHotkeyPressed;
+
+    public event Action<string>? TextTyped;
+
+    public event Action? TextSequenceInterrupted;
 
     /// <summary>钩子安装失败的 Win32 错误码；0 表示正常。</summary>
     public int HookError { get; private set; }
@@ -131,14 +146,25 @@ public sealed class NativeInputGuard : IDisposable
 
             var data = Marshal.PtrToStructure<KbdLlHookStruct>(lParam);
             var key = data.VkCode;
-            var control = IsKeyDown(VkControl);
-            var alt = IsKeyDown(VkMenu);
+            UpdateModifierState(key, isDown);
+            var control = IsControlPressed();
+            var alt = IsAltPressed() || (data.Flags & LlKhfAltDown) != 0;
             var shift = IsKeyDown(VkShift);
 
-            // Ctrl+Alt+L 是全局锁屏热键，解锁后也用于重新聚焦密码框。
+            if (isUp && key == VkL)
+            {
+                _hotkeyLatched = false;
+            }
+
+            // 修饰键被锁定规则吞掉后，仍用钩子内记录的状态识别全局热键。
             if (isDown && key == VkL && control && alt)
             {
-                LockHotkeyPressed?.Invoke(this, EventArgs.Empty);
+                if (!_hotkeyLatched)
+                {
+                    _hotkeyLatched = true;
+                    LockHotkeyPressed?.Invoke(this, EventArgs.Empty);
+                }
+
                 return new IntPtr(1);
             }
 
@@ -165,6 +191,11 @@ public sealed class NativeInputGuard : IDisposable
                 return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
             }
 
+            if (_locked && isDown)
+            {
+                CaptureTextSequence(data, key, control, alt);
+            }
+
             if (_locked && ShouldSuppress(key, control, alt, shift))
             {
                 return new IntPtr(1);
@@ -177,6 +208,88 @@ public sealed class NativeInputGuard : IDisposable
 
         return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
+
+    private void CaptureTextSequence(KbdLlHookStruct data, uint key, bool control, bool alt)
+    {
+        if (key is VkShift or VkLShift or VkRShift or VkCapital)
+        {
+            return;
+        }
+
+        if (control || alt || _windowsKeyDown)
+        {
+            TextSequenceInterrupted?.Invoke();
+            return;
+        }
+
+        var text = TranslateText(data);
+        if (string.IsNullOrEmpty(text) || text.Any(char.IsControl))
+        {
+            TextSequenceInterrupted?.Invoke();
+            return;
+        }
+
+        TextTyped?.Invoke(text);
+    }
+
+    private static string TranslateText(KbdLlHookStruct data)
+    {
+        var keyboardState = new byte[256];
+        if (!GetKeyboardState(keyboardState))
+        {
+            return string.Empty;
+        }
+
+        SetPressedState(keyboardState, VkShift, IsKeyDown(VkShift));
+        SetPressedState(keyboardState, VkControl, false);
+        SetPressedState(keyboardState, VkMenu, false);
+        keyboardState[VkCapital] = (byte)((GetKeyState((int)VkCapital) & 0x0001) != 0 ? 1 : 0);
+
+        var foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+        var layout = GetKeyboardLayout(foregroundThread);
+        var buffer = new StringBuilder(8);
+        var length = ToUnicodeEx(
+            data.VkCode,
+            data.ScanCode,
+            keyboardState,
+            buffer,
+            buffer.Capacity,
+            0x0004,
+            layout);
+        return length > 0 ? buffer.ToString(0, length) : string.Empty;
+    }
+
+    private static void SetPressedState(byte[] keyboardState, uint key, bool pressed)
+    {
+        keyboardState[key] = pressed ? (byte)0x80 : (byte)0;
+    }
+
+    private void UpdateModifierState(uint key, bool isDown)
+    {
+        if (key is not (VkControl or VkLControl or VkRControl or VkMenu or VkLMenu or VkRMenu))
+        {
+            return;
+        }
+
+        if (isDown)
+        {
+            _pressedModifiers.Add(key);
+        }
+        else
+        {
+            _pressedModifiers.Remove(key);
+        }
+    }
+
+    private bool IsControlPressed() =>
+        _pressedModifiers.Contains(VkControl) ||
+        _pressedModifiers.Contains(VkLControl) ||
+        _pressedModifiers.Contains(VkRControl);
+
+    private bool IsAltPressed() =>
+        _pressedModifiers.Contains(VkMenu) ||
+        _pressedModifiers.Contains(VkLMenu) ||
+        _pressedModifiers.Contains(VkRMenu);
 
     private bool ShouldSuppress(uint key, bool control, bool alt, bool shift)
     {
@@ -271,6 +384,32 @@ public sealed class NativeInputGuard : IDisposable
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
+
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int key);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetKeyboardState(byte[] keyState);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int ToUnicodeEx(
+        uint virtualKey,
+        uint scanCode,
+        byte[] keyState,
+        [Out] StringBuilder buffer,
+        int bufferSize,
+        uint flags,
+        IntPtr keyboardLayout);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetKeyboardLayout(uint threadId);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern int GetMessage(
