@@ -57,8 +57,16 @@ public sealed class GuardSettingsPage : SettingsPageBase
         };
         versionText.Tapped += (_, _) => RevealPasswordEditors();
         root.Children.Add(versionText);
-        _versionHint = Hint("连续点击版本号 5 次，显示普通密码和 Admin 密码设置。");
+        _versionHint = Hint("需要设置或修改密码？请阅读 GitHub README 中的「密码设置入口」。");
         root.Children.Add(_versionHint);
+        var readmeButton = new Button
+        {
+            Content = "打开密码设置说明（GitHub README）",
+            MinHeight = 38,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        readmeButton.Click += (_, _) => OpenPasswordSetupReadme();
+        root.Children.Add(readmeButton);
 
         _passwordEditors = new StackPanel { Spacing = 14, IsVisible = false };
         root.Children.Add(_passwordEditors);
@@ -229,6 +237,19 @@ public sealed class GuardSettingsPage : SettingsPageBase
         RefreshState();
     }
 
+    private void OpenPasswordSetupReadme()
+    {
+        const string url = "https://github.com/mjdds/ClassScreenGuard/blob/main/README.md#密码设置入口";
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception)
+        {
+            _versionHint.Text = $"无法自动打开浏览器，请手动访问：{url}";
+        }
+    }
+
     private void RevealPasswordEditors()
     {
         if (_passwordEditors.IsVisible)
@@ -244,7 +265,6 @@ public sealed class GuardSettingsPage : SettingsPageBase
 
         if (_versionClickCount < 5)
         {
-            _versionHint.Text = $"还需连续点击 {5 - _versionClickCount} 次版本号。";
             return;
         }
 
