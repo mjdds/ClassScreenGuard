@@ -18,6 +18,9 @@ public sealed class NativePointerGuard : IDisposable
     private const uint WinEventOutOfContext = 0x0000;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint GaRoot = 2;
+    private const int GwlExStyle = -20;
+    private const int WsExToolWindow = 0x00000080;
+    private const int WsExNoActivate = 0x08000000;
 
     private static readonly HashSet<string> BlockedShellProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -88,6 +91,24 @@ public sealed class NativePointerGuard : IDisposable
                 }
             }
         }
+    }
+
+    public void KeepFloatingWindowsTopmost()
+    {
+        if (!_locked || _disposed)
+        {
+            return;
+        }
+
+        EnumWindows((handle, _) =>
+        {
+            if (IsPluginFloatingWindow(handle) && IsWindowVisible(handle))
+            {
+                NativeWindowMethods.SetTopmost(handle);
+            }
+
+            return true;
+        }, IntPtr.Zero);
     }
 
     public void Start()
@@ -274,11 +295,35 @@ public sealed class NativePointerGuard : IDisposable
     private bool IsAllowedWindow(IntPtr handle)
     {
         var root = GetAncestor(handle, GaRoot);
+        if (IsPluginFloatingWindow(handle) ||
+            (root != IntPtr.Zero && IsPluginFloatingWindow(root)))
+        {
+            return true;
+        }
+
         lock (_allowedWindowsSync)
         {
             return _allowedWindows.Contains(handle) ||
                    (root != IntPtr.Zero && _allowedWindows.Contains(root));
         }
+    }
+
+    private static bool IsPluginFloatingWindow(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        GetWindowThreadProcessId(handle, out var processId);
+        if (processId != Environment.ProcessId)
+        {
+            return false;
+        }
+
+        var extendedStyle = GetWindowLong(handle, GwlExStyle);
+        return (extendedStyle & (WsExToolWindow | WsExNoActivate)) ==
+               (WsExToolWindow | WsExNoActivate);
     }
 
     private void HideShellWindow(IntPtr handle)
@@ -484,6 +529,9 @@ public sealed class NativePointerGuard : IDisposable
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr handle, int index);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

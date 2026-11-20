@@ -328,6 +328,8 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
             }
         }
 
+        _pointerGuard.KeepFloatingWindowsTopmost();
+
         var foreground = NativeWindowMethods.GetForegroundWindow();
         var virtualKeyboardFocused = _pointerGuard.IsVirtualKeyboardWindow(foreground);
 
