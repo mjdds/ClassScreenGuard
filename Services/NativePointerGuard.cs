@@ -12,6 +12,7 @@ public sealed class NativePointerGuard : IDisposable
     private const int WmQuit = 0x0012;
     private const int ObjIdWindow = 0;
     private const int SwHide = 0;
+    private const int SwShowNoActivate = 4;
     private const uint EventSystemForeground = 0x0003;
     private const uint EventObjectShow = 0x8002;
     private const uint WinEventOutOfContext = 0x0000;
@@ -38,6 +39,7 @@ public sealed class NativePointerGuard : IDisposable
     private readonly ManualResetEventSlim _ready = new(false);
     private readonly object _allowedWindowsSync = new();
     private readonly HashSet<IntPtr> _allowedWindows = new();
+    private readonly HashSet<IntPtr> _hiddenShellWindows = new();
     private readonly Dictionary<uint, string?> _processNames = new();
     private Thread? _thread;
     private IntPtr _mouseHookHandle;
@@ -63,6 +65,7 @@ public sealed class NativePointerGuard : IDisposable
         _locked = locked;
         if (!locked)
         {
+            RestoreShellWindows();
             lock (_allowedWindowsSync)
             {
                 _processNames.Clear();
@@ -115,7 +118,7 @@ public sealed class NativePointerGuard : IDisposable
         {
             if (IsWindowVisible(handle) && !IsAllowedWindow(handle) && IsBlockedShellWindow(handle))
             {
-                ShowWindowAsync(handle, SwHide);
+                HideShellWindow(handle);
             }
 
             return true;
@@ -229,7 +232,7 @@ public sealed class NativePointerGuard : IDisposable
         {
             if (IsBlockedShellWindow(handle))
             {
-                ShowWindowAsync(handle, SwHide);
+                HideShellWindow(handle);
             }
 
             if (eventType == EventSystemForeground)
@@ -278,6 +281,43 @@ public sealed class NativePointerGuard : IDisposable
         }
     }
 
+    private void HideShellWindow(IntPtr handle)
+    {
+        if (!_locked)
+        {
+            return;
+        }
+
+        ShowWindowAsync(handle, SwHide);
+        lock (_allowedWindowsSync)
+        {
+            _hiddenShellWindows.Add(handle);
+        }
+
+        if (!_locked)
+        {
+            RestoreShellWindows();
+        }
+    }
+
+    public void RestoreShellWindows()
+    {
+        List<IntPtr> hidden;
+        lock (_allowedWindowsSync)
+        {
+            hidden = _hiddenShellWindows.ToList();
+            _hiddenShellWindows.Clear();
+        }
+
+        foreach (var handle in hidden)
+        {
+            if (!IsWindowVisible(handle))
+            {
+                ShowWindowAsync(handle, SwShowNoActivate);
+            }
+        }
+    }
+
     private bool IsBlockedShellWindow(IntPtr handle)
     {
         var className = GetWindowClassName(handle);
@@ -293,14 +333,7 @@ public sealed class NativePointerGuard : IDisposable
         }
 
         var processName = GetProcessName(processId);
-        if (string.IsNullOrEmpty(processName))
-        {
-            return false;
-        }
-
-        return BlockedShellProcesses.Contains(processName) ||
-               (processName.Equals("explorer.exe", StringComparison.OrdinalIgnoreCase) &&
-                className == "Windows.UI.Core.CoreWindow");
+        return !string.IsNullOrEmpty(processName) && BlockedShellProcesses.Contains(processName);
     }
 
     private string? GetProcessName(uint processId)
@@ -357,6 +390,8 @@ public sealed class NativePointerGuard : IDisposable
 
         _disposed = true;
         _locked = false;
+        RestoreShellWindows();
+        _passwordPromptOpen = false;
         if (_threadId != 0)
         {
             PostThreadMessage(_threadId, WmQuit, IntPtr.Zero, IntPtr.Zero);

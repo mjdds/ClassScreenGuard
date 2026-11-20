@@ -15,6 +15,7 @@ public sealed class UnlockWindow : Window
 
     private readonly GuardSettingsService _settings;
     private readonly Action _unlock;
+    private readonly Action<string>? _textTyped;
     private readonly DispatcherTimer _cooldownTimer;
     private readonly TextBox _passwordBox;
     private readonly TextBlock _titleText;
@@ -23,10 +24,11 @@ public sealed class UnlockWindow : Window
     private readonly Button _unlockButton;
     private bool _isCoolingDown;
 
-    public UnlockWindow(GuardSettingsService settings, Action unlock)
+    public UnlockWindow(GuardSettingsService settings, Action unlock, Action<string>? textTyped = null)
     {
         _settings = settings;
         _unlock = unlock;
+        _textTyped = textTyped;
 
         Width = 430;
         SizeToContent = SizeToContent.Height;
@@ -50,6 +52,13 @@ public sealed class UnlockWindow : Window
             {
                 e.Handled = true;
                 AttemptUnlock();
+            }
+        };
+        _passwordBox.TextInput += (_, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Text))
+            {
+                _textTyped?.Invoke(e.Text);
             }
         };
 
@@ -217,16 +226,18 @@ public sealed class UnlockWindow : Window
             _cooldownTimer.Start();
         }
 
-        _passwordBox.IsEnabled = false;
+        _passwordBox.IsEnabled = true;
         _unlockButton.IsEnabled = false;
-        _statusText.Text = "请等待5分钟后重试";
+        _statusText.Text = "普通密码暂时不可用，可连续输入 Admin 密码解控。";
         _hintText.Text = $"普通密码已连续输错 10 次，剩余 {FormatRemaining(remaining)}。";
     }
 
     private void ClearAndFocusPassword()
     {
         _passwordBox.Text = string.Empty;
+        _passwordBox.IsEnabled = true;
         _passwordBox.Focus();
+        _passwordBox.CaretIndex = _passwordBox.Text.Length;
     }
 
     private static string FormatRemaining(TimeSpan remaining)

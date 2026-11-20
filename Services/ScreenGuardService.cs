@@ -21,6 +21,7 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
     private AdminUnlockNoticeWindow? _adminNoticeWindow;
     private bool _systemShutdown;
     private bool _disposed;
+    private IntPtr _previousForeground;
 
     public ScreenGuardService(GuardSettingsService settings)
     {
@@ -108,6 +109,7 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
             return;
         }
 
+        _previousForeground = NativeWindowMethods.GetForegroundWindow();
         IsLocked = true;
         _adminSequence.SetActive(true);
         _adminNoticeWindow?.Close();
@@ -189,7 +191,7 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
 
         _inputGuard.SetPasswordPromptOpen(true);
         _pointerGuard.SetPasswordPromptOpen(true);
-        var prompt = new UnlockWindow(_settings, UnlockOnUiThread);
+        var prompt = new UnlockWindow(_settings, UnlockOnUiThread, _adminSequence.Append);
         _unlockWindow = prompt;
         prompt.Closed += (_, _) =>
         {
@@ -245,7 +247,15 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
         _windows.Clear();
         _inputGuard.SetLocked(false);
         _pointerGuard.SetAllowedWindows(Array.Empty<IntPtr>());
+        _pointerGuard.RestoreShellWindows();
         _pointerGuard.SetLocked(false);
+
+        var previousForeground = _previousForeground;
+        _previousForeground = IntPtr.Zero;
+        if (previousForeground != IntPtr.Zero)
+        {
+            NativeWindowMethods.SetForegroundWindow(previousForeground);
+        }
     }
 
     private void AdminUnlockOnUiThread()

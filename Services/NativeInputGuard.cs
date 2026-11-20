@@ -191,7 +191,7 @@ public sealed class NativeInputGuard : IDisposable
                 return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
             }
 
-            if (_locked && isDown)
+            if (_locked && isDown && !_passwordPromptOpen)
             {
                 CaptureTextSequence(data, key, control, alt);
             }
@@ -235,9 +235,9 @@ public sealed class NativeInputGuard : IDisposable
     private static string TranslateText(KbdLlHookStruct data)
     {
         var keyboardState = new byte[256];
-        if (!GetKeyboardState(keyboardState))
+        for (var key = 0; key < keyboardState.Length; key++)
         {
-            return string.Empty;
+            keyboardState[key] = IsKeyDown((uint)key) ? (byte)0x80 : (byte)0;
         }
 
         SetPressedState(keyboardState, VkShift, IsKeyDown(VkShift));
@@ -328,6 +328,10 @@ public sealed class NativeInputGuard : IDisposable
 
         _disposed = true;
         _locked = false;
+        _passwordPromptOpen = false;
+        _windowsKeyDown = false;
+        _hotkeyLatched = false;
+        _pressedModifiers.Clear();
 
         if (_threadId != 0)
         {
@@ -387,10 +391,6 @@ public sealed class NativeInputGuard : IDisposable
 
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int key);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetKeyboardState(byte[] keyState);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int ToUnicodeEx(
