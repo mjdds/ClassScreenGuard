@@ -295,12 +295,6 @@ public sealed class NativePointerGuard : IDisposable
     private bool IsAllowedWindow(IntPtr handle)
     {
         var root = GetAncestor(handle, GaRoot);
-        if (IsPluginFloatingWindow(handle) ||
-            (root != IntPtr.Zero && IsPluginFloatingWindow(root)))
-        {
-            return true;
-        }
-
         lock (_allowedWindowsSync)
         {
             return _allowedWindows.Contains(handle) ||

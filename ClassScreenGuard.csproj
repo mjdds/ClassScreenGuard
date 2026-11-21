@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ClassScreenGuard</AssemblyName>
     <RootNamespace>ClassScreenGuard</RootNamespace>
-    <Version>1.5.1.0</Version>
+    <Version>1.5.2.0</Version>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
