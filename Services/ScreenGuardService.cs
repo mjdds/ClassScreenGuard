@@ -44,7 +44,14 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
     {
         _inputGuard.Start();
         _pointerGuard.Start();
-        SystemEvents.SessionEnding += OnSessionEnding;
+        try
+        {
+            SystemEvents.SessionEnding += OnSessionEnding;
+        }
+        catch (Exception)
+        {
+            // 某些受限会话无法创建 SystemEvents 窗口线程；不能因此中断其他插件启动。
+        }
         RunOnUiThread(() =>
         {
             _scheduleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
@@ -63,7 +70,14 @@ public sealed class ScreenGuardService : IHostedService, IDisposable
     public Task StopAsync(CancellationToken cancellationToken)
     {
         _settings.SetResumeLockAfterLogoff(IsLocked && !_systemShutdown);
-        SystemEvents.SessionEnding -= OnSessionEnding;
+        try
+        {
+            SystemEvents.SessionEnding -= OnSessionEnding;
+        }
+        catch (Exception)
+        {
+            // SystemEvents 可能从未成功初始化。
+        }
         RunOnUiThread(() =>
         {
             _scheduleTimer?.Stop();
